@@ -1,0 +1,377 @@
+name: Linketh CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Job 1: Basic validation (fast feedback)
+  validate:
+    name: Code Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Rust toolchain
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        target: wasm32-unknown-unknown
+        override: true
+        components: rustfmt, clippy
+        
+    - name: Cache cargo registry
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-registry-
+          
+    - name: Cache cargo build
+      uses: actions/cache@v4
+      with:
+        path: target
+        key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-build-
+          
+    - name: Check code formatting
+      run: cargo fmt -- --check
+      
+    - name: Run clippy
+      run: cargo clippy --all-targets --all-features -- -D warnings
+      
+    - name: Check for security vulnerabilities
+      run: |
+        cargo install cargo-audit
+        cargo audit
+
+  # Job 2: Build and test
+  build-and-test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: validate
+    
+    strategy:
+      matrix:
+        rust-version: [stable, beta]
+        
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Rust toolchain
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: ${{ matrix.rust-version }}
+        target: wasm32-unknown-unknown
+        override: true
+        
+    - name: Cache cargo registry
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+        key: ${{ runner.os }}-${{ matrix.rust-version }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ matrix.rust-version }}-cargo-registry-
+          
+    - name: Cache cargo build
+      uses: actions/cache@v4
+      with:
+        path: target
+        key: ${{ runner.os }}-${{ matrix.rust-version }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ matrix.rust-version }}-cargo-build-
+          
+    - name: Build project (debug)
+      run: cargo build --verbose
+      
+    - name: Build project (release)
+      run: cargo build --release --verbose
+      
+    - name: Build WASM target
+      run: cargo build --target wasm32-unknown-unknown --release --verbose
+      
+    - name: Run unit tests
+      run: cargo test --lib --verbose
+      
+    - name: Run all tests with coverage
+      run: |
+        cargo install cargo-tarpaulin
+        cargo tarpaulin --lib --out xml --timeout 120
+        
+    - name: Upload coverage to Codecov
+      if: matrix.rust-version == 'stable'
+      uses: codecov/codecov-action@v4
+      with:
+        file: ./cobertura.xml
+        fail_ci_if_error: false
+
+  # Job 3: Stylus compatibility check (CRITICAL for branch protection)
+  stylus-check:
+    name: Stylus Compatibility Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: build-and-test
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Rust toolchain
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        target: wasm32-unknown-unknown
+        override: true
+        
+    - name: Cache cargo registry
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+        key: ${{ runner.os }}-stylus-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-stylus-cargo-registry-
+          
+    - name: Cache cargo build
+      uses: actions/cache@v4
+      with:
+        path: target
+        key: ${{ runner.os }}-stylus-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-stylus-cargo-build-
+          
+    - name: Install Stylus CLI
+      run: cargo install --force cargo-stylus cargo-stylus-check
+      
+    - name: Build release for Stylus check
+      run: cargo build --release --target wasm32-unknown-unknown
+      
+    - name: Run Stylus compatibility check
+      run: cargo stylus check --wasm-file target/wasm32-unknown-unknown/release/linketh.wasm
+      
+    - name: Check WASM size
+      run: |
+        WASM_SIZE=$(stat -c%s target/wasm32-unknown-unknown/release/linketh.wasm)
+        echo "WASM size: $WASM_SIZE bytes"
+        if [ $WASM_SIZE -gt 131072 ]; then  # 128KB limit
+          echo "❌ WASM size exceeds 128KB limit"
+          exit 1
+        else
+          echo "✅ WASM size is within limits"
+        fi
+
+  # Job 4: Docker build test
+  docker-build:
+    name: Docker Build Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: validate
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      
+    - name: Build Docker image (runtime)
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        target: runtime
+        push: false
+        tags: linketh:test-runtime
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        
+    - name: Build Docker image (wasm)
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        target: wasm
+        push: false
+        tags: linketh:test-wasm
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        
+    - name: Test Docker runtime image
+      run: |
+        docker run --rm linketh:test-runtime cargo --version
+        docker run --rm linketh:test-runtime cargo stylus --version
+
+  # Job 5: Security audit
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: validate
+    continue-on-error: true  # Don't fail CI on security warnings for now
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Rust toolchain
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        override: true
+        
+    - name: Install cargo-audit
+      run: cargo install cargo-audit
+      
+    - name: Run security audit
+      run: cargo audit --db ~/.cargo/advisory-db
+      
+    - name: Run dependency check
+      run: |
+        cargo tree --duplicates
+        cargo tree --edges normal --format "{p} {f}"
+
+  # Job 6: Documentation check
+  docs-check:
+    name: Documentation Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: validate
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Rust toolchain
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        target: wasm32-unknown-unknown
+        override: true
+        
+    - name: Check documentation
+      run: cargo doc --no-deps --document-private-items
+      
+    - name: Check README examples
+      run: |
+        # Verify that README examples are valid
+        grep -q "cargo stylus check" README.md
+        grep -q "cargo test" README.md
+        grep -q "cargo build" README.md
+
+  # Job 7: Integration check (simulates real deployment scenario)
+  integration-check:
+    name: Integration Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [build-and-test, stylus-check]
+    if: github.event_name == 'pull_request' && (github.base_ref == 'main' || github.base_ref == 'develop')
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Rust toolchain
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        target: wasm32-unknown-unknown
+        override: true
+        
+    - name: Install Stylus CLI
+      run: cargo install --force cargo-stylus cargo-stylus-check
+      
+    - name: Full build pipeline
+      run: |
+        echo "🔄 Running full build pipeline..."
+        cargo clean
+        cargo build --release --target wasm32-unknown-unknown
+        cargo test --lib
+        cargo stylus check
+        echo "✅ Integration check completed successfully"
+
+  # Job 8: Create release artifacts (only on main branch)
+  release-artifacts:
+    name: Create Release Artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [stylus-check, docker-build]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Rust toolchain
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        target: wasm32-unknown-unknown
+        override: true
+        
+    - name: Install Stylus CLI
+      run: cargo install --force cargo-stylus
+      
+    - name: Build release artifacts
+      run: |
+        cargo build --release --target wasm32-unknown-unknown
+        cargo stylus export-abi > linketh.abi.json
+        
+    - name: Upload WASM artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: linketh-wasm
+        path: target/wasm32-unknown-unknown/release/linketh.wasm
+        retention-days: 30
+        
+    - name: Upload ABI artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: linketh-abi
+        path: linketh.abi.json
+        retention-days: 30
+
+# Summary job for branch protection
+  ci-success:
+    name: CI Success
+    runs-on: ubuntu-latest
+    needs: [validate, build-and-test, stylus-check, docker-build, docs-check]
+    if: always()
+    
+    steps:
+    - name: Check all jobs
+      run: |
+        if [[ "${{ needs.validate.result }}" == "success" && \
+              "${{ needs.build-and-test.result }}" == "success" && \
+              "${{ needs.stylus-check.result }}" == "success" && \
+              "${{ needs.docker-build.result }}" == "success" && \
+              "${{ needs.docs-check.result }}" == "success" ]]; then
+          echo "✅ All required checks passed"
+        else
+          echo "❌ One or more required checks failed"
+          echo "Validate: ${{ needs.validate.result }}"
+          echo "Build and Test: ${{ needs.build-and-test.result }}"
+          echo "Stylus Check: ${{ needs.stylus-check.result }}"
+          echo "Docker Build: ${{ needs.docker-build.result }}"
+          echo "Docs Check: ${{ needs.docs-check.result }}"
+          exit 1
+        fi

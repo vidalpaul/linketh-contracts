@@ -1,5 +1,7 @@
 ./idea
 /target
+/tmp
 /ignore
+/.claude
 .env
 

@@ -1,0 +1,198 @@
+name: Security Audit
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  schedule:
+    # Run security audit every day at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Rust toolchain
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        override: true
+        
+    - name: Cache cargo registry
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+        key: ${{ runner.os }}-security-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+        
+    - name: Install security tools
+      run: |
+        cargo install cargo-audit cargo-deny
+        
+    - name: Update advisory database
+      run: cargo audit --update-db
+      
+    - name: Run cargo audit
+      run: cargo audit
+      
+    - name: Run cargo deny check
+      run: |
+        # Create deny.toml if it doesn't exist
+        if [ ! -f deny.toml ]; then
+          cat > deny.toml << 'EOF'
+        [advisories]
+        db-path = "~/.cargo/advisory-db"
+        db-urls = ["https://github.com/rustsec/advisory-db"]
+        vulnerability = "deny"
+        unmaintained = "warn"
+        yanked = "deny"
+        notice = "warn"
+        ignore = []
+
+        [licenses]
+        unlicensed = "deny"
+        allow = [
+            "MIT",
+            "Apache-2.0",
+            "Apache-2.0 WITH LLVM-exception",
+            "BSD-2-Clause",
+            "BSD-3-Clause",
+            "ISC",
+            "Unicode-DFS-2016",
+        ]
+        deny = []
+        copyleft = "warn"
+        allow-osi-fsf-free = "neither"
+        default = "deny"
+        confidence-threshold = 0.8
+
+        [bans]
+        multiple-versions = "warn"
+        wildcards = "warn"
+        highlight = "all"
+        workspace-default-features = "allow"
+        external-default-features = "allow"
+
+        [sources]
+        unknown-registry = "deny"
+        unknown-git = "deny"
+        allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+        allow-git = []
+        EOF
+        fi
+        cargo deny check
+        
+    - name: Check for sensitive information
+      run: |
+        echo "🔍 Checking for potential sensitive information..."
+        
+        # Check for potential secrets in code
+        PATTERNS=(
+          "password\s*=\s*['\"][^'\"]*['\"]"
+          "secret\s*=\s*['\"][^'\"]*['\"]"
+          "key\s*=\s*['\"][^'\"]*['\"]"
+          "token\s*=\s*['\"][^'\"]*['\"]"
+          "api[_-]?key\s*=\s*['\"][^'\"]*['\"]"
+          "private[_-]?key"
+          "-----BEGIN\s+(RSA\s+)?PRIVATE\s+KEY-----"
+        )
+        
+        FOUND=false
+        for pattern in "${PATTERNS[@]}"; do
+          if grep -r -i -E "$pattern" src/ --exclude-dir=target 2>/dev/null; then
+            echo "⚠️  Potential sensitive information found: $pattern"
+            FOUND=true
+          fi
+        done
+        
+        if [ "$FOUND" = true ]; then
+          echo "❌ Sensitive information detected in source code"
+          exit 1
+        else
+          echo "✅ No sensitive information detected"
+        fi
+        
+    - name: Check dependencies for known issues
+      run: |
+        echo "📦 Analyzing dependencies..."
+        cargo tree --format "{p} {l}" | grep -E "(GPL|AGPL)" || echo "✅ No problematic licenses found"
+        
+    - name: Generate security report
+      run: |
+        echo "# Security Report - $(date)" > security-report.md
+        echo "" >> security-report.md
+        echo "## Audit Results" >> security-report.md
+        cargo audit --format json > audit-report.json || true
+        
+        echo "## Dependency Tree" >> security-report.md
+        echo '```' >> security-report.md
+        cargo tree --depth 2 >> security-report.md
+        echo '```' >> security-report.md
+        
+    - name: Upload security report
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: security-report
+        path: |
+          security-report.md
+          audit-report.json
+        retention-days: 30
+
+  supply-chain-check:
+    name: Supply Chain Security
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Rust toolchain
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        override: true
+        
+    - name: Install cargo-geiger
+      run: cargo install cargo-geiger
+      
+    - name: Run unsafe code analysis
+      run: |
+        echo "🔬 Analyzing unsafe code usage..."
+        cargo geiger --format GitHubMarkdown > unsafe-report.md || true
+        
+    - name: Check for proc macros
+      run: |
+        echo "🔍 Checking procedural macros..."
+        cargo tree --format "{p} {f}" | grep -i "proc-macro" > proc-macros.txt || true
+        if [ -s proc-macros.txt ]; then
+          echo "📋 Found procedural macros:"
+          cat proc-macros.txt
+        else
+          echo "✅ No procedural macros found"
+        fi
+        
+    - name: Upload supply chain report
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: supply-chain-report
+        path: |
+          unsafe-report.md
+          proc-macros.txt
+        retention-days: 30
