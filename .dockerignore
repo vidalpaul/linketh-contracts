@@ -11,8 +11,6 @@ header.png
 
 # Rust build artifacts
 target/
-Cargo.lock
-
 # IDE and editor files
 .vscode/
 .idea/
