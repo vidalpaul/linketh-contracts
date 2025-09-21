@@ -1,0 +1,78 @@
+# Git
+.git/
+.gitignore
+.github/
+
+# Documentation
+README.md
+*.md
+docs/
+header.png
+
+# Rust build artifacts
+target/
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment and secrets
+.env
+.env.local
+*.pem
+*.key
+*.p12
+
+# Logs
+*.log
+logs/
+
+# Test coverage
+cobertura.xml
+coverage/
+tarpaulin-report.html
+
+# Security reports
+security-report.md
+audit-report.json
+unsafe-report.md
+proc-macros.txt
+
+# CI/CD artifacts
+.github/
+ci/
+
+# Package managers
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# OS generated files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# Examples and test data
+examples/
+test-data/
+fixtures/
+
+# License files that don't affect build
+LICENSE*
+CHANGELOG*
+CONTRIBUTING*
